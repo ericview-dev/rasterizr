@@ -538,6 +538,24 @@
       const animRef      = useRef(null);
       const drawnRef     = useRef(0);
       const fileInputRef = useRef(null);
+
+      const [shape,      setShape]      = useState("circle");
+      const [svgSegs,    setSvgSegs]    = useState(null);
+      const [svgName,    setSvgName]    = useState("");
+      const [pitch,      setPitch]      = useState(2.0);
+      const [dotRadius,  setDotRadius]  = useState(0.6);
+      const [dotColor,   setDotColor]   = useState("Green");
+      const [showGrid,   setShowGrid]   = useState(true);
+      const [showAxes,   setShowAxes]   = useState(true);
+      const [showGhost,  setShowGhost]  = useState(true);
+      const [points,     setPoints]     = useState([]);
+      const [hovered,    setHovered]    = useState(null);
+      const [dragOver,   setDragOver]   = useState(false);
+      const [parseError, setParseError] = useState("");
+      const [pngHref,    setPngHref]    = useState("");
+      const [txtHref,    setTxtHref]    = useState("");
+      const [jsonHref,   setJsonHref]   = useState("");
+      const [showCoords, setShowCoords] = useState(false);
       const colabTimerRef = useRef(null);
 
       const [shape,       setShape]       = useState("circle");
@@ -752,6 +770,11 @@
         const jsonUrl  = URL.createObjectURL(jsonBlob);
         setJsonHref(jsonUrl);
 
+        // compute simple [x,y] pairs for the UI coords panel
+        const coordsArray = points.map(p => [p.lx, p.ly]);
+        // store a lightweight string on the element (not persisted) so it's easy to show
+        // (we keep it local; rendering will re-evaluate from `points` too)
+        // no-op — left for clarity
         // Auto-push [x, y] pairs to kernel — silent if not in Colab
         invokeColabCoords(points);
 
@@ -1168,6 +1191,20 @@
                     pointerEvents: jsonHref ? "auto" : "none",
                   }}>↓ JSON</a>
 
+                <button onClick={() => setShowCoords(s => !s)}
+                  style={{
+                    display: "block", width: "100%", marginTop: 6,
+                    boxSizing: "border-box", background: "transparent",
+                    border: "1px solid #1a1a2a", color: "#c8c8d8",
+                    padding: "6px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", textAlign: "left", cursor: "pointer",
+                  }}>{showCoords ? "Hide coords" : "Show coords"}</button>
+
+                {showCoords && (
+                  <div style={{ marginTop: 6, maxHeight: 120, overflow: "auto",
+                    background: "#05050a", border: "1px solid #151526", padding: 8,
+                    fontSize: 11, whiteSpace: "pre", color: "#d0d0e6", fontFamily: "monospace" }}>
+                    {JSON.stringify(points.map(p => [p.lx, p.ly]), null, 2)}
                 {/* ── NEW: Save JSON to Colab ── */}
                 <button
                   onClick={saveToColab}
