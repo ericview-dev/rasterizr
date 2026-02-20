@@ -422,16 +422,27 @@
       return dots;
     }
 
+    // ── Named dot colours (used in mono mode and written to JSON) ────────────────
+    const COLOR_MAP = {
+      Red:    "#ff4455",
+      Yellow: "#ffdd00",
+      Green:  "#00e87a",
+      Cyan:   "#00ffcc",
+      Blue:   "#4488ff",
+    };
+    const COLOR_NAMES = ["Red", "Yellow", "Green", "Cyan", "Blue"];
+
     // ── Color modes ──────────────────────────────────────────────────────────────
-    const COLORMODES = {
+    // dotColor is only used by the "mono" mode; gradient modes ignore it.
+    const makeColorModes = (dotColor) => ({
       position: (_t, x, y) =>
         `hsl(${Math.round(((x + HALF) / GRID) * 220 + 120)},90%,${55 + Math.round(((y + HALF) / GRID) * 20)}%)`,
       index: (t) =>
         `hsl(${Math.round(t * 340)},100%,65%)`,
       tangent: (_t, x, y, nx, ny) =>
         `hsl(${Math.round(((Math.atan2(ny - y, nx - x) / Math.PI + 1) / 2) * 360)},90%,65%)`,
-      mono: () => "#00ffcc",
-    };
+      mono: () => COLOR_MAP[dotColor] || COLOR_MAP.Cyan,
+    });
 
     // ── App component ────────────────────────────────────────────────────────────
     function App() {
@@ -445,7 +456,7 @@
       const [svgName,    setSvgName]    = useState("");
       const [pitch,      setPitch]      = useState(2.0);
       const [dotRadius,  setDotRadius]  = useState(0.6);
-      const [colorMode,  setColorMode]  = useState("position");
+      const [dotColor,   setDotColor]   = useState("Green");
       const [showGrid,   setShowGrid]   = useState(true);
       const [showAxes,   setShowAxes]   = useState(true);
       const [showGhost,  setShowGhost]  = useState(true);
@@ -455,6 +466,7 @@
       const [parseError, setParseError] = useState("");
       const [pngHref,    setPngHref]    = useState("");
       const [txtHref,    setTxtHref]    = useState("");
+      const [jsonHref,   setJsonHref]   = useState("");
 
       const getSegments = useCallback(() => {
         return svgSegs ?? SHAPES[shape](800);
@@ -538,8 +550,8 @@
           });
         }
 
-        // Build coloured dot list
-        const colorFn = COLORMODES[colorMode];
+        // Build coloured dot list — always mono, colour set by dotColor
+        const colorFn = makeColorModes(dotColor)["mono"];
         const final = dots.map((p, idx) => {
           const nxt   = dots[idx + 1] || dots[idx];
           const color = colorFn(idx / dots.length, p.x, p.y, nxt.x, nxt.y);
@@ -579,14 +591,16 @@
         };
         animRef.current = requestAnimationFrame(drawBatch);
 
-      }, [getSegments, pitch, dotRadius, colorMode, showGrid, showAxes, showGhost]);
+      }, [getSegments, pitch, dotRadius, dotColor, showGrid, showAxes, showGhost]);
 
       useEffect(() => { rasterize(); }, [rasterize]);
 
-      // Rebuild TXT blob URL whenever points change
+      // Rebuild TXT and JSON blob URLs whenever points change
       useEffect(() => {
         if (!points.length) return;
         const name = svgName || shape;
+
+        // ── TXT ──
         const hdr = [
           "# SVG Rasterizer v3.0",
           `# Grid: 80x80 lu, origin (0,0) centre, +Y up`,
@@ -595,11 +609,33 @@
           "index\tx\ty\tcolor",
         ].join("\n");
         const rows = points.map(p => `${p.idx}\t${p.lx}\t${p.ly}\t${p.color}`);
-        const blob = new Blob([[hdr, ...rows].join("\n")], { type: "text/plain" });
-        const url  = URL.createObjectURL(blob);
-        setTxtHref(url);
-        return () => URL.revokeObjectURL(url);
-      }, [points, pitch, dotRadius, shape, svgName, getSegments]);
+        const txtBlob = new Blob([[hdr, ...rows].join("\n")], { type: "text/plain" });
+        const txtUrl  = URL.createObjectURL(txtBlob);
+        setTxtHref(txtUrl);
+
+        // ── JSON ──
+        // For mono mode, write the named colour label; for gradient modes write the CSS value.
+        const jsonPayload = {
+          source:      name,
+          pitch:       pitch,
+          dotRadius:   dotRadius,
+          dotColor:    dotColor,
+          segments:    getSegments().length,
+          coordinates: points.map(p => ({
+            x:     p.lx,
+            y:     p.ly,
+            color: dotColor,
+          })),
+        };
+        const jsonBlob = new Blob([JSON.stringify(jsonPayload, null, 2)], { type: "application/json" });
+        const jsonUrl  = URL.createObjectURL(jsonBlob);
+        setJsonHref(jsonUrl);
+
+        return () => {
+          URL.revokeObjectURL(txtUrl);
+          URL.revokeObjectURL(jsonUrl);
+        };
+      }, [points, pitch, dotRadius, shape, svgName, dotColor, getSegments]);
 
       // File load handlers
       const loadSVGText = (text, name) => {
@@ -653,11 +689,6 @@
         { id: "heart",  label: "♥ Heart"  }, { id: "spiral", label: "◎ Spiral" },
         { id: "wave",   label: "∿ Wave"   }, { id: "square", label: "□ Square" },
       ];
-      const modeList = [
-        { id: "position", label: "XY Pos"  }, { id: "index",   label: "Index"   },
-        { id: "tangent",  label: "Tangent" }, { id: "mono",    label: "Mono"    },
-      ];
-
       const BTN = {
         display: "block", width: "100%", textAlign: "left",
         padding: "4px 7px", marginBottom: 2, cursor: "pointer",
@@ -845,20 +876,35 @@
                 </div>
               </div>
 
-              {/* Color mode */}
+              {/* Dot colour picker */}
               <div style={{ padding: "10px 12px", borderRight: "1px solid #12122a",
                 minWidth: 90, flexShrink: 0 }}>
                 <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
-                  marginBottom: 5, textTransform: "uppercase" }}>Color</div>
-                {modeList.map(m => (
-                  <button key={m.id} onClick={() => setColorMode(m.id)} style={{
-                    ...BTN,
-                    background: colorMode === m.id ? "rgba(90,70,190,0.18)" : "transparent",
-                    border: `1px solid ${colorMode === m.id ? "#5a46be" : "#161630"}`,
-                    color: colorMode === m.id ? "#a888ff" : "#404068",
-                    fontSize: 9, padding: "3px 6px",
-                  }}>{m.label}</button>
-                ))}
+                  marginBottom: 6, textTransform: "uppercase" }}>Color</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {COLOR_NAMES.map(cname => {
+                    const hex    = COLOR_MAP[cname];
+                    const active = dotColor === cname;
+                    return (
+                      <button key={cname} onClick={() => setDotColor(cname)} style={{
+                        display: "flex", alignItems: "center", gap: 6,
+                        background: active ? `${hex}18` : "transparent",
+                        border: `1px solid ${active ? hex : "#1e1e34"}`,
+                        color: active ? hex : "#383858",
+                        padding: "3px 6px", fontSize: 9, fontFamily: "monospace",
+                        cursor: "pointer", width: "100%", textAlign: "left",
+                        transition: "all 0.1s",
+                      }}>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                          background: hex,
+                          boxShadow: active ? `0 0 6px ${hex}88` : "none",
+                        }} />
+                        {cname}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Dot settings */}
@@ -915,7 +961,8 @@
                   href={txtHref || undefined}
                   download={`raster_v3.0_${svgName || shape}.txt`}
                   style={{
-                    display: "block", width: "100%", boxSizing: "border-box",
+                    display: "block", width: "100%", marginBottom: 4,
+                    boxSizing: "border-box",
                     background: "transparent",
                     border: `1px solid ${txtHref ? "#2a2a48" : "#1a1a2a"}`,
                     color: txtHref ? "#484870" : "#2a2a40",
@@ -925,6 +972,20 @@
                     cursor: txtHref ? "pointer" : "default",
                     pointerEvents: txtHref ? "auto" : "none",
                   }}>↓ TXT</a>
+                <a
+                  href={jsonHref || undefined}
+                  download={`raster_v3.0_${svgName || shape}.json`}
+                  style={{
+                    display: "block", width: "100%", boxSizing: "border-box",
+                    background: jsonHref ? "rgba(168,136,255,0.07)" : "transparent",
+                    border: `1px solid ${jsonHref ? "#5a46be88" : "#1a1a2a"}`,
+                    color: jsonHref ? "#a888ff" : "#2a2a40",
+                    padding: "5px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", whiteSpace: "nowrap",
+                    textDecoration: "none",
+                    cursor: jsonHref ? "pointer" : "default",
+                    pointerEvents: jsonHref ? "auto" : "none",
+                  }}>↓ JSON</a>
               </div>
             </div>
 
