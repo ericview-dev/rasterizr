@@ -468,6 +468,7 @@ ColorSelector Branch
       const [pngHref,    setPngHref]    = useState("");
       const [txtHref,    setTxtHref]    = useState("");
       const [jsonHref,   setJsonHref]   = useState("");
+      const [showCoords, setShowCoords] = useState(false);
 
       const getSegments = useCallback(() => {
         return svgSegs ?? SHAPES[shape](800);
@@ -631,6 +632,12 @@ ColorSelector Branch
         const jsonBlob = new Blob([JSON.stringify(jsonPayload, null, 2)], { type: "application/json" });
         const jsonUrl  = URL.createObjectURL(jsonBlob);
         setJsonHref(jsonUrl);
+
+        // compute simple [x,y] pairs for the UI coords panel
+        const coordsArray = points.map(p => [p.lx, p.ly]);
+        // store a lightweight string on the element (not persisted) so it's easy to show
+        // (we keep it local; rendering will re-evaluate from `points` too)
+        // no-op — left for clarity
 
         return () => {
           URL.revokeObjectURL(txtUrl);
@@ -987,6 +994,23 @@ ColorSelector Branch
                     cursor: jsonHref ? "pointer" : "default",
                     pointerEvents: jsonHref ? "auto" : "none",
                   }}>↓ JSON</a>
+
+                <button onClick={() => setShowCoords(s => !s)}
+                  style={{
+                    display: "block", width: "100%", marginTop: 6,
+                    boxSizing: "border-box", background: "transparent",
+                    border: "1px solid #1a1a2a", color: "#c8c8d8",
+                    padding: "6px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", textAlign: "left", cursor: "pointer",
+                  }}>{showCoords ? "Hide coords" : "Show coords"}</button>
+
+                {showCoords && (
+                  <div style={{ marginTop: 6, maxHeight: 120, overflow: "auto",
+                    background: "#05050a", border: "1px solid #151526", padding: 8,
+                    fontSize: 11, whiteSpace: "pre", color: "#d0d0e6", fontFamily: "monospace" }}>
+                    {JSON.stringify(points.map(p => [p.lx, p.ly]), null, 2)}
+                  </div>
+                )}
               </div>
             </div>
 
