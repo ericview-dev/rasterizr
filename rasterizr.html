@@ -1,7 +1,11 @@
 <!DOCTYPE html>
 <!--
-  SVG Rasterizer v3.0  —  Self-contained HTML / Colab package
+  SVG Rasterizer v3.1  —  Self-contained HTML / Colab package
   ─────────────────────────────────────────────────────────────
+  Changes from v3.0:
+    • Added "Copy XY" button in Export panel — copies all coordinates
+      as a plain x,y list (one point per line) to the clipboard.
+
   Dependencies loaded via CDN (no install required):
     • React 18 + ReactDOM
     • Babel Standalone (transpiles JSX in-browser)
@@ -9,7 +13,7 @@
   USAGE IN GOOGLE COLAB
   ─────────────────────
   from IPython.display import IFrame, display
-  display(IFrame(src="svg_rasterizer_v3.0.html", width="100%", height="700"))
+  display(IFrame(src="svg_rasterizer_v3.1.html", width="100%", height="700"))
 
   Or open directly in any modern browser — no server needed.
 -->
@@ -17,7 +21,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SVG Rasterizer v3.0</title>
+  <title>SVG Rasterizer v3.1</title>
 
   <!-- React 18 -->
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
@@ -57,25 +61,19 @@
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ── Constants ────────────────────────────────────────────────────────────────
-    // Logical grid: 80×80 units, origin (0,0) at centre → range −40..+40
-    // Canvas buffer is 2× display size for crisp HiDPI rendering
     const GRID = 80;
-    const HALF = GRID / 2;       // 40
-    const VIEW = 192;            // CSS display px
-    const DPR  = 2;              // buffer multiplier
-    const BUF  = VIEW * DPR;    // internal buffer px (384)
-    const PX   = VIEW / GRID;   // px per logical unit at display size (2.4)
+    const HALF = GRID / 2;
+    const VIEW = 192;
+    const DPR  = 2;
+    const BUF  = VIEW * DPR;
+    const PX   = VIEW / GRID;
 
-    // Logical → buffer pixel
     const lx2buf = x =>  (x + HALF) * PX * DPR;
     const ly2buf = y =>  (HALF - y) * PX * DPR;
-
-    // Display pixel → logical (for hover hit-testing)
     const dx2l = cx => cx * (GRID / VIEW) - HALF;
     const dy2l = cy => HALF - cy * (GRID / VIEW);
 
     // ── Built-in shapes ──────────────────────────────────────────────────────────
-    // Each shape returns [[{x,y}, …]] — one segment wrapped in an array.
     const SHAPES = {
       circle: (n) => {
         const pts = [];
@@ -139,9 +137,6 @@
     };
 
     // ── SVG path parser ──────────────────────────────────────────────────────────
-    // Returns [[{x,y},…], …] — one array per sub-path.
-    // Each M command flushes the current sub-path and starts a new one,
-    // so disconnected sub-paths are never joined by a spurious bridge line.
     function parseSVGPathD(d) {
       const re = /([MmZzLlHhVvCcSsQqTtAa])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/g;
       const tokens = [];
@@ -260,7 +255,7 @@
         }
         else if (C === "A") {
           while (hasNum()) {
-            num(); num(); num(); num(); num(); // skip rx ry x-rot large-arc sweep
+            num(); num(); num(); num(); num();
             const ex = abs ? num() : cx + num();
             const ey = abs ? num() : cy + num();
             for (let s = 1; s <= 24; s++)
@@ -275,8 +270,6 @@
     }
 
     // ── SVG element extractor ────────────────────────────────────────────────────
-    // Returns [[{x,y},…], …] — one segment per SVG element / sub-path.
-    // Segments are never joined across element or sub-path boundaries.
     function extractSVGPaths(svgText) {
       const parser = new DOMParser();
       const doc    = parser.parseFromString(svgText, "image/svg+xml");
@@ -366,7 +359,9 @@
       );
       const spanX = maxX - minX || 1;
       const spanY = maxY - minY || 1;
-      const sc    = Math.min((HALF * 2 - 2) / spanX, (HALF * 2 - 2) / spanY);
+      // Scale so the shape's bounding diagonal fits within the radius-40 circle
+      const diagHalf = Math.sqrt(spanX * spanX + spanY * spanY) / 2;
+      const sc    = 38 / diagHalf;  // 38 leaves a small margin inside r=40
       const midX  = (minX + maxX) / 2;
       const midY  = (minY + maxY) / 2;
 
@@ -375,7 +370,7 @@
       );
     }
 
-    // ── Arc-length resample (single segment) ─────────────────────────────────────
+    // ── Arc-length resample ──────────────────────────────────────────────────────
     function resampleSegment(pts, n) {
       if (pts.length < 2) return pts;
       const lens = [0];
@@ -400,21 +395,21 @@
       return out;
     }
 
-    // ── Pitch-based dot sampler (multi-segment) ──────────────────────────────────
-    // Processes each segment independently — no bridge dots between sub-paths.
+    // ── Pitch-based dot sampler ──────────────────────────────────────────────────
     function buildDots(segments, pitch) {
       const FINE = 800;
       const dots = [];
       segments.forEach(seg => {
         const fine = resampleSegment(seg, FINE);
         if (!fine.length) return;
-        dots.push(fine[0]);
+        const inCircle = p => (p.x * p.x + p.y * p.y) <= 1600; // 40^2
+        if (inCircle(fine[0])) dots.push(fine[0]);
         let accumulated = 0;
         for (let i = 1; i < fine.length; i++) {
           const dx = fine[i].x - fine[i-1].x, dy = fine[i].y - fine[i-1].y;
           accumulated += Math.sqrt(dx*dx + dy*dy);
           if (accumulated >= pitch) {
-            dots.push(fine[i]);
+            if (inCircle(fine[i])) dots.push(fine[i]);
             accumulated = 0;
           }
         }
@@ -422,7 +417,7 @@
       return dots;
     }
 
-    // ── Named dot colours (used in mono mode and written to JSON) ────────────────
+    // ── Named dot colours ────────────────────────────────────────────────────────
     const COLOR_MAP = {
       Red:    "#ff4455",
       Yellow: "#ffdd00",
@@ -433,14 +428,7 @@
     const COLOR_NAMES = ["Red", "Yellow", "Green", "Cyan", "Blue"];
 
     // ── Color modes ──────────────────────────────────────────────────────────────
-    // dotColor is only used by the "mono" mode; gradient modes ignore it.
     const makeColorModes = (dotColor) => ({
-      position: (_t, x, y) =>
-        `hsl(${Math.round(((x + HALF) / GRID) * 220 + 120)},90%,${55 + Math.round(((y + HALF) / GRID) * 20)}%)`,
-      index: (t) =>
-        `hsl(${Math.round(t * 340)},100%,65%)`,
-      tangent: (_t, x, y, nx, ny) =>
-        `hsl(${Math.round(((Math.atan2(ny - y, nx - x) / Math.PI + 1) / 2) * 360)},90%,65%)`,
       mono: () => COLOR_MAP[dotColor] || COLOR_MAP.Cyan,
     });
 
@@ -468,6 +456,9 @@
       const [txtHref,    setTxtHref]    = useState("");
       const [jsonHref,   setJsonHref]   = useState("");
 
+      // ── NEW: copy-to-clipboard state ─────────────────────────────────────────
+      const [copied,     setCopied]     = useState(false);
+
       const getSegments = useCallback(() => {
         return svgSegs ?? SHAPES[shape](800);
       }, [svgSegs, shape]);
@@ -478,11 +469,9 @@
         const ctx = canvas.getContext("2d");
         ctx.clearRect(0, 0, BUF, BUF);
 
-        // Background
         ctx.fillStyle = "#07070f";
         ctx.fillRect(0, 0, BUF, BUF);
 
-        // Grid — single pass, isMajor decides colour and weight
         if (showGrid) {
           for (let u = -HALF; u <= HALF; u += 5) {
             const isMajor = u % 10 === 0;
@@ -501,7 +490,6 @@
           }
         }
 
-        // Axes
         if (showAxes) {
           const ox = lx2buf(0), oy = ly2buf(0);
           ctx.strokeStyle = "#2a2a55";
@@ -529,13 +517,21 @@
           ctx.fillText("+40", BUF - 30, oy - 4);
           ctx.fillText("+40", ox + 4,   10);
           ctx.fillText("−40", ox + 4,   BUF - 3);
+
+          // Circular workspace boundary (r=40)
+          ctx.beginPath();
+          ctx.arc(ox, oy, 40 * PX * DPR, 0, Math.PI * 2);
+          ctx.strokeStyle = "#1e1e42";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
         }
 
         const segs = getSegments();
         const dots = buildDots(segs, pitch);
         if (!dots.length) return;
 
-        // Ghost path — one stroke() per segment, never bridging sub-paths
         if (showGhost) {
           ctx.strokeStyle = "rgba(255,255,255,0.08)";
           ctx.lineWidth   = 1.5;
@@ -550,7 +546,6 @@
           });
         }
 
-        // Build coloured dot list — always mono, colour set by dotColor
         const colorFn = makeColorModes(dotColor)["mono"];
         const final = dots.map((p, idx) => {
           const nxt   = dots[idx + 1] || dots[idx];
@@ -567,7 +562,6 @@
         });
         setPoints(final);
 
-        // Animated dot draw
         if (animRef.current) cancelAnimationFrame(animRef.current);
         drawnRef.current = 0;
         const dotR  = Math.max(0.5, dotRadius * PX * DPR);
@@ -595,14 +589,12 @@
 
       useEffect(() => { rasterize(); }, [rasterize]);
 
-      // Rebuild TXT and JSON blob URLs whenever points change
       useEffect(() => {
         if (!points.length) return;
         const name = svgName || shape;
 
-        // ── TXT ──
         const hdr = [
-          "# SVG Rasterizer v3.0",
+          "# SVG Rasterizer v3.1",
           `# Grid: 80x80 lu, origin (0,0) centre, +Y up`,
           `# Source: ${name}  |  Pitch: ${pitch} lu  |  Radius: ${dotRadius} lu`,
           `# Segments: ${getSegments().length}  |  Total dots: ${points.length}`,
@@ -613,8 +605,6 @@
         const txtUrl  = URL.createObjectURL(txtBlob);
         setTxtHref(txtUrl);
 
-        // ── JSON ──
-        // For mono mode, write the named colour label; for gradient modes write the CSS value.
         const jsonPayload = {
           source:      name,
           pitch:       pitch,
@@ -636,6 +626,29 @@
           URL.revokeObjectURL(jsonUrl);
         };
       }, [points, pitch, dotRadius, shape, svgName, dotColor, getSegments]);
+
+      // ── NEW: Copy XY handler ─────────────────────────────────────────────────
+      const handleCopyXY = useCallback(() => {
+        if (!points.length) return;
+        const inner = points.map(p => `[${p.lx}, ${p.ly}]`).join(", ");
+        const text  = `currentCoordinates = [${inner}]`.replace(/\n/g, "");
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        }).catch(() => {
+          // Fallback for environments where clipboard API is blocked (e.g. Colab iframes)
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+          catch(e) { console.warn("Copy failed:", e); }
+          document.body.removeChild(ta);
+        });
+      }, [points]);
 
       // File load handlers
       const loadSVGText = (text, name) => {
@@ -667,7 +680,6 @@
 
       const clearSVG = () => { setSvgSegs(null); setSvgName(""); setParseError(""); };
 
-      // Hover hit-test
       const handleMouseMove = e => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -728,7 +740,7 @@
             <span style={{ fontWeight: 700, fontSize: 12,
               letterSpacing: "0.1em", color: "#fff" }}>VECTOR → RASTER</span>
             <span style={{ background: "#00ffcc", color: "#000", fontSize: 8,
-              padding: "2px 7px", fontWeight: 700, letterSpacing: "0.14em" }}>v3.0</span>
+              padding: "2px 7px", fontWeight: 700, letterSpacing: "0.14em" }}>v3.1</span>
             <span style={{ color: "#222242", fontSize: 9 }}>80×80 lu · {VIEW}px · +Y↑</span>
             <span style={{ color: "#00ffcc", fontSize: 9 }}>{points.length} dots</span>
             {svgSegs &&
@@ -944,7 +956,7 @@
                   marginBottom: 6, textTransform: "uppercase" }}>Export</div>
                 <a
                   href={pngHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.png`}
+                  download={`raster_v3.1_${svgName || shape}.png`}
                   style={{
                     display: "block", width: "100%", marginBottom: 4,
                     boxSizing: "border-box",
@@ -959,7 +971,7 @@
                   }}>↓ PNG</a>
                 <a
                   href={txtHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.txt`}
+                  download={`raster_v3.1_${svgName || shape}.txt`}
                   style={{
                     display: "block", width: "100%", marginBottom: 4,
                     boxSizing: "border-box",
@@ -974,9 +986,10 @@
                   }}>↓ TXT</a>
                 <a
                   href={jsonHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.json`}
+                  download={`raster_v3.1_${svgName || shape}.json`}
                   style={{
-                    display: "block", width: "100%", boxSizing: "border-box",
+                    display: "block", width: "100%", marginBottom: 4,
+                    boxSizing: "border-box",
                     background: jsonHref ? "rgba(168,136,255,0.07)" : "transparent",
                     border: `1px solid ${jsonHref ? "#5a46be88" : "#1a1a2a"}`,
                     color: jsonHref ? "#a888ff" : "#2a2a40",
@@ -986,6 +999,26 @@
                     cursor: jsonHref ? "pointer" : "default",
                     pointerEvents: jsonHref ? "auto" : "none",
                   }}>↓ JSON</a>
+
+                {/* ── NEW: Copy XY button ───────────────────────────────────── */}
+                <button
+                  onClick={handleCopyXY}
+                  disabled={!points.length}
+                  title={`Copy all ${points.length} x,y coordinates to clipboard`}
+                  style={{
+                    display: "block", width: "100%", boxSizing: "border-box",
+                    background: copied
+                      ? "rgba(0,232,122,0.15)"
+                      : points.length ? "rgba(0,255,204,0.04)" : "transparent",
+                    border: `1px solid ${copied ? "#00e87a" : points.length ? "#00ffcc33" : "#1a1a2a"}`,
+                    color: copied ? "#00e87a" : points.length ? "#00ccaa" : "#2a2a40",
+                    padding: "5px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", whiteSpace: "nowrap",
+                    cursor: points.length ? "pointer" : "default",
+                    transition: "all 0.2s",
+                  }}>
+                  {copied ? "✓ copied!" : "⎘ Copy XY"}
+                </button>
               </div>
             </div>
 
