@@ -456,8 +456,9 @@
       const [txtHref,    setTxtHref]    = useState("");
       const [jsonHref,   setJsonHref]   = useState("");
 
-      // ── NEW: copy-to-clipboard state ─────────────────────────────────────────
-      const [copied,     setCopied]     = useState(false);
+      const [copied,      setCopied]      = useState(false);
+      const [showCopyBox, setShowCopyBox] = useState(false);
+      const [copyText,    setCopyText]    = useState("");
 
       const getSegments = useCallback(() => {
         return svgSegs ?? SHAPES[shape](800);
@@ -627,27 +628,18 @@
         };
       }, [points, pitch, dotRadius, shape, svgName, dotColor, getSegments]);
 
-      // ── NEW: Copy XY handler ─────────────────────────────────────────────────
+      // ── Copy XY handler ──────────────────────────────────────────────────────
       const handleCopyXY = useCallback(() => {
         if (!points.length) return;
         const inner = points.map(p => `[${p.lx}, ${p.ly}]`).join(", ");
-        const text  = `currentCoordinates = [${inner}]`.replace(/\n/g, "");
+        const text  = `currentCoordinates = [${inner}]`;
+        setCopyText(text);
+        setShowCopyBox(true);
+        // Also try clipboard API — works in browser, silently fails in Colab
         navigator.clipboard.writeText(text).then(() => {
           setCopied(true);
           setTimeout(() => setCopied(false), 2000);
-        }).catch(() => {
-          // Fallback for environments where clipboard API is blocked (e.g. Colab iframes)
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          try { document.execCommand("copy"); setCopied(true); setTimeout(() => setCopied(false), 2000); }
-          catch(e) { console.warn("Copy failed:", e); }
-          document.body.removeChild(ta);
-        });
+        }).catch(() => {});
       }, [points]);
 
       // File load handlers
@@ -1021,6 +1013,37 @@
                 </button>
               </div>
             </div>
+
+            {/* Copy XY box — shown after button click, Colab-safe */}
+            {showCopyBox &&
+              <div style={{ padding: "8px 12px", borderBottom: "1px solid #12122a",
+                background: "#080814", flexShrink: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between",
+                  alignItems: "center", marginBottom: 5 }}>
+                  <span style={{ fontSize: 8, letterSpacing: "0.2em",
+                    color: "#00ccaa", textTransform: "uppercase" }}>
+                    ⎘ Select all &amp; copy — Ctrl+A, Ctrl+C
+                  </span>
+                  <button onClick={() => setShowCopyBox(false)} style={{
+                    background: "transparent", border: "none",
+                    color: "#303054", fontSize: 10, cursor: "pointer",
+                    fontFamily: "monospace", padding: "0 4px",
+                  }}>✕</button>
+                </div>
+                <textarea
+                  readOnly
+                  value={copyText}
+                  onClick={e => e.target.select()}
+                  style={{
+                    width: "100%", height: 48, resize: "none",
+                    background: "#0a0a1c", border: "1px solid #00ffcc22",
+                    color: "#00ccaa", fontFamily: "monospace", fontSize: 9,
+                    padding: "6px 8px", outline: "none", lineHeight: 1.5,
+                    wordBreak: "break-all",
+                  }}
+                />
+              </div>
+            }
 
             {/* 3. Coordinate list */}
             <div style={{ flex: 1, display: "flex", flexDirection: "column",
