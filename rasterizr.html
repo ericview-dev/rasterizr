@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  SVG Rasterizer v3.0  —  Self-contained HTML / Colab package
+  SVG Rasterizer v3.1  —  Self-contained HTML / Colab package
   ─────────────────────────────────────────────────────────────
   Dependencies loaded via CDN (no install required):
     • React 18 + ReactDOM
@@ -8,18 +8,72 @@
 
   USAGE IN GOOGLE COLAB
   ─────────────────────
-  from IPython.display import IFrame, display
-  display(IFrame(src="svg_rasterizer_v3.0.html", width="100%", height="700"))
+  NOTE: window.google is NOT available inside a file-loaded IFrame.
+  Solution: the IFrame uses window.parent.postMessage to pass data up to the
+  Colab cell output context (where google.colab.kernel IS available), and a
+  JS listener injected by the setup cell bridges that to the Python kernel.
+
+  Single setup cell — registers Python handlers, injects the postMessage
+  bridge, and displays the rasterizer:
+
+    import json, pathlib, builtins
+    import google.colab.kernel as ck
+    from IPython.display import Javascript, IFrame, display
+
+    currentCoordinates = []
+
+    def _update_coords(pairs_json):
+        global currentCoordinates
+        currentCoordinates = json.loads(pairs_json)
+        builtins.currentCoordinates = currentCoordinates
+        print(f"currentCoordinates -> {len(currentCoordinates)} pts, "
+              f"first 3: {currentCoordinates[:3]}")
+
+    def _save_json(json_str, filename):
+        p = pathlib.Path(filename)
+        p.write_text(json_str)
+        print(f"Saved {p.resolve()}  ({p.stat().st_size:,} bytes)")
+
+    ck.register_function('svgRasterizerUpdateCoords',
+                         lambda pairs_json: _update_coords(pairs_json),
+                         type_check=False)
+    ck.register_function('svgRasterizerSaveJSON',
+                         lambda json_str, filename: _save_json(json_str, filename),
+                         type_check=False)
+
+    # Inject bridge into Colab output — this context has google.colab.kernel
+    display(Javascript("""
+      if (!window.__svgRasterizerBridge) {
+        window.__svgRasterizerBridge = true;
+        window.addEventListener('message', async (e) => {
+          if (!e.data || e.data.source !== 'svgRasterizer') return;
+          const k = google.colab.kernel;
+          if (e.data.type === 'updateCoords') {
+            await k.invokeFunction('svgRasterizerUpdateCoords', [e.data.payload], {});
+          } else if (e.data.type === 'saveJSON') {
+            try {
+              await k.invokeFunction('svgRasterizerSaveJSON',
+                                     [e.data.payload, e.data.filename], {});
+              e.source.postMessage(
+                {source:'svgRasterizerHost', type:'saveOK', filename:e.data.filename}, '*');
+            } catch(err) {
+              e.source.postMessage(
+                {source:'svgRasterizerHost', type:'saveERR', msg:String(err)}, '*');
+            }
+          }
+        });
+      }
+    """))
+    display(IFrame(src="svg_rasterizer_v3.1.html", width="100%", height="700"))
 
   Or open directly in any modern browser — no server needed.
-
-  ES: testing Github change
+  (Colab features inactive; JSON download button still works.)
 -->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SVG Rasterizer v3.0</title>
+  <title>SVG Rasterizer v3.1</title>
 
   <!-- React 18 -->
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
@@ -50,6 +104,14 @@
 
     /* Checkbox accent */
     input[type=checkbox] { accent-color: #00ffcc; }
+
+    /* Colab save button pulse animation */
+    @keyframes colab-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(0,255,204,0.5); }
+      70%  { box-shadow: 0 0 0 6px rgba(0,255,204,0); }
+      100% { box-shadow: 0 0 0 0 rgba(0,255,204,0); }
+    }
+    .colab-saved { animation: colab-pulse 0.6s ease-out; }
   </style>
 </head>
 <body>
@@ -59,25 +121,19 @@
     const { useState, useEffect, useRef, useCallback } = React;
 
     // ── Constants ────────────────────────────────────────────────────────────────
-    // Logical grid: 80×80 units, origin (0,0) at centre → range −40..+40
-    // Canvas buffer is 2× display size for crisp HiDPI rendering
     const GRID = 80;
-    const HALF = GRID / 2;       // 40
-    const VIEW = 192;            // CSS display px
-    const DPR  = 2;              // buffer multiplier
-    const BUF  = VIEW * DPR;    // internal buffer px (384)
-    const PX   = VIEW / GRID;   // px per logical unit at display size (2.4)
+    const HALF = GRID / 2;
+    const VIEW = 192;
+    const DPR  = 2;
+    const BUF  = VIEW * DPR;
+    const PX   = VIEW / GRID;
 
-    // Logical → buffer pixel
     const lx2buf = x =>  (x + HALF) * PX * DPR;
     const ly2buf = y =>  (HALF - y) * PX * DPR;
-
-    // Display pixel → logical (for hover hit-testing)
-    const dx2l = cx => cx * (GRID / VIEW) - HALF;
-    const dy2l = cy => HALF - cy * (GRID / VIEW);
+    const dx2l   = cx => cx * (GRID / VIEW) - HALF;
+    const dy2l   = cy => HALF - cy * (GRID / VIEW);
 
     // ── Built-in shapes ──────────────────────────────────────────────────────────
-    // Each shape returns [[{x,y}, …]] — one segment wrapped in an array.
     const SHAPES = {
       circle: (n) => {
         const pts = [];
@@ -141,9 +197,6 @@
     };
 
     // ── SVG path parser ──────────────────────────────────────────────────────────
-    // Returns [[{x,y},…], …] — one array per sub-path.
-    // Each M command flushes the current sub-path and starts a new one,
-    // so disconnected sub-paths are never joined by a spurious bridge line.
     function parseSVGPathD(d) {
       const re = /([MmZzLlHhVvCcSsQqTtAa])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/g;
       const tokens = [];
@@ -262,7 +315,7 @@
         }
         else if (C === "A") {
           while (hasNum()) {
-            num(); num(); num(); num(); num(); // skip rx ry x-rot large-arc sweep
+            num(); num(); num(); num(); num();
             const ex = abs ? num() : cx + num();
             const ey = abs ? num() : cy + num();
             for (let s = 1; s <= 24; s++)
@@ -277,8 +330,6 @@
     }
 
     // ── SVG element extractor ────────────────────────────────────────────────────
-    // Returns [[{x,y},…], …] — one segment per SVG element / sub-path.
-    // Segments are never joined across element or sub-path boundaries.
     function extractSVGPaths(svgText) {
       const parser = new DOMParser();
       const doc    = parser.parseFromString(svgText, "image/svg+xml");
@@ -403,7 +454,6 @@
     }
 
     // ── Pitch-based dot sampler (multi-segment) ──────────────────────────────────
-    // Processes each segment independently — no bridge dots between sub-paths.
     function buildDots(segments, pitch) {
       const FINE = 800;
       const dots = [];
@@ -424,7 +474,7 @@
       return dots;
     }
 
-    // ── Named dot colours (used in mono mode and written to JSON) ────────────────
+    // ── Named dot colours ─────────────────────────────────────────────────────────
     const COLOR_MAP = {
       Red:    "#ff4455",
       Yellow: "#ffdd00",
@@ -434,17 +484,53 @@
     };
     const COLOR_NAMES = ["Red", "Yellow", "Green", "Cyan", "Blue"];
 
-    // ── Color modes ──────────────────────────────────────────────────────────────
-    // dotColor is only used by the "mono" mode; gradient modes ignore it.
     const makeColorModes = (dotColor) => ({
-      position: (_t, x, y) =>
-        `hsl(${Math.round(((x + HALF) / GRID) * 220 + 120)},90%,${55 + Math.round(((y + HALF) / GRID) * 20)}%)`,
-      index: (t) =>
-        `hsl(${Math.round(t * 340)},100%,65%)`,
-      tangent: (_t, x, y, nx, ny) =>
-        `hsl(${Math.round(((Math.atan2(ny - y, nx - x) / Math.PI + 1) / 2) * 360)},90%,65%)`,
       mono: () => COLOR_MAP[dotColor] || COLOR_MAP.Cyan,
     });
+
+    // ── Colab kernel bridge via postMessage ──────────────────────────────────────
+    // window.google is undefined inside a file-loaded IFrame, so we can't call
+    // invokeFunction directly. Instead we postMessage to window.parent, where the
+    // Colab cell output context has google.colab.kernel and runs our JS bridge.
+
+    // Auto-fires on every points change — silently updates currentCoordinates.
+    function invokeColabCoords(pts) {
+      try {
+        const pairs = JSON.stringify(pts.map(p => [p.lx, p.ly]));
+        window.parent.postMessage(
+          { source: 'svgRasterizer', type: 'updateCoords', payload: pairs }, '*'
+        );
+      } catch (_) { /* not in a frame — ignore */ }
+    }
+
+    // Called by the export button — saves the full JSON file to disk.
+    // Returns a Promise that resolves/rejects based on a reply postMessage.
+    function invokeColabSave(jsonString, filename) {
+      return new Promise((resolve, reject) => {
+        // Check we're actually in a parent frame
+        if (window.parent === window) {
+          reject(new Error("Not running inside Colab — use the JSON button to download instead."));
+          return;
+        }
+        const onReply = (e) => {
+          if (!e.data || e.data.source !== 'svgRasterizerHost') return;
+          if (e.data.type === 'saveOK' || e.data.type === 'saveERR') {
+            window.removeEventListener('message', onReply);
+            if (e.data.type === 'saveOK') resolve(e.data.filename);
+            else reject(new Error(e.data.msg || 'Save failed'));
+          }
+        };
+        window.addEventListener('message', onReply);
+        // Timeout after 10s in case the bridge isn't installed
+        setTimeout(() => {
+          window.removeEventListener('message', onReply);
+          reject(new Error("No response from Colab bridge — did you run the setup cell?"));
+        }, 10000);
+        window.parent.postMessage(
+          { source: 'svgRasterizer', type: 'saveJSON', payload: jsonString, filename }, '*'
+        );
+      });
+    }
 
     // ── App component ────────────────────────────────────────────────────────────
     function App() {
@@ -452,27 +538,64 @@
       const animRef      = useRef(null);
       const drawnRef     = useRef(0);
       const fileInputRef = useRef(null);
+      const colabTimerRef = useRef(null);
 
-      const [shape,      setShape]      = useState("circle");
-      const [svgSegs,    setSvgSegs]    = useState(null);
-      const [svgName,    setSvgName]    = useState("");
-      const [pitch,      setPitch]      = useState(2.0);
-      const [dotRadius,  setDotRadius]  = useState(0.6);
-      const [dotColor,   setDotColor]   = useState("Green");
-      const [showGrid,   setShowGrid]   = useState(true);
-      const [showAxes,   setShowAxes]   = useState(true);
-      const [showGhost,  setShowGhost]  = useState(true);
-      const [points,     setPoints]     = useState([]);
-      const [hovered,    setHovered]    = useState(null);
-      const [dragOver,   setDragOver]   = useState(false);
-      const [parseError, setParseError] = useState("");
-      const [pngHref,    setPngHref]    = useState("");
-      const [txtHref,    setTxtHref]    = useState("");
-      const [jsonHref,   setJsonHref]   = useState("");
+      const [shape,       setShape]       = useState("circle");
+      const [svgSegs,     setSvgSegs]     = useState(null);
+      const [svgName,     setSvgName]     = useState("");
+      const [pitch,       setPitch]       = useState(2.0);
+      const [dotRadius,   setDotRadius]   = useState(0.6);
+      const [dotColor,    setDotColor]    = useState("Green");
+      const [showGrid,    setShowGrid]    = useState(true);
+      const [showAxes,    setShowAxes]    = useState(true);
+      const [showGhost,   setShowGhost]   = useState(true);
+      const [points,      setPoints]      = useState([]);
+      const [hovered,     setHovered]     = useState(null);
+      const [dragOver,    setDragOver]    = useState(false);
+      const [parseError,  setParseError]  = useState("");
+      const [pngHref,     setPngHref]     = useState("");
+      const [txtHref,     setTxtHref]     = useState("");
+      const [jsonHref,    setJsonHref]    = useState("");
+
+      // ── NEW: Colab save state ─────────────────────────────────────────────────
+      // null | 'saving' | 'saved' | 'error'
+      const [colabStatus,  setColabStatus]  = useState(null);
+      const [colabMsg,     setColabMsg]     = useState("");
+      // Mirror of the current JSON payload string so saveToColab can read it
+      const jsonStringRef = useRef("");
 
       const getSegments = useCallback(() => {
         return svgSegs ?? SHAPES[shape](800);
       }, [svgSegs, shape]);
+
+      // ── NEW: Save to Colab handler ────────────────────────────────────────────
+      const saveToColab = useCallback(async () => {
+        if (!jsonStringRef.current) return;
+        if (colabStatus === 'saving') return;
+
+        // Clear any pending reset timer
+        if (colabTimerRef.current) clearTimeout(colabTimerRef.current);
+
+        const filename = `raster_v3.1_${svgName || shape}.json`;
+        setColabStatus('saving');
+        setColabMsg('');
+
+        try {
+          await invokeColabSave(jsonStringRef.current, filename);
+          setColabStatus('saved');
+          setColabMsg(filename);
+          colabTimerRef.current = setTimeout(() => setColabStatus(null), 3500);
+        } catch (err) {
+          setColabStatus('error');
+          setColabMsg(err.message || 'Unknown error');
+          colabTimerRef.current = setTimeout(() => setColabStatus(null), 5000);
+        }
+      }, [colabStatus, svgName, shape]);
+
+      // Cleanup timer on unmount
+      useEffect(() => () => {
+        if (colabTimerRef.current) clearTimeout(colabTimerRef.current);
+      }, []);
 
       const rasterize = useCallback(() => {
         const canvas = canvasRef.current;
@@ -480,11 +603,9 @@
         const ctx = canvas.getContext("2d");
         ctx.clearRect(0, 0, BUF, BUF);
 
-        // Background
         ctx.fillStyle = "#07070f";
         ctx.fillRect(0, 0, BUF, BUF);
 
-        // Grid — single pass, isMajor decides colour and weight
         if (showGrid) {
           for (let u = -HALF; u <= HALF; u += 5) {
             const isMajor = u % 10 === 0;
@@ -503,7 +624,6 @@
           }
         }
 
-        // Axes
         if (showAxes) {
           const ox = lx2buf(0), oy = ly2buf(0);
           ctx.strokeStyle = "#2a2a55";
@@ -537,7 +657,6 @@
         const dots = buildDots(segs, pitch);
         if (!dots.length) return;
 
-        // Ghost path — one stroke() per segment, never bridging sub-paths
         if (showGhost) {
           ctx.strokeStyle = "rgba(255,255,255,0.08)";
           ctx.lineWidth   = 1.5;
@@ -552,7 +671,6 @@
           });
         }
 
-        // Build coloured dot list — always mono, colour set by dotColor
         const colorFn = makeColorModes(dotColor)["mono"];
         const final = dots.map((p, idx) => {
           const nxt   = dots[idx + 1] || dots[idx];
@@ -569,7 +687,6 @@
         });
         setPoints(final);
 
-        // Animated dot draw
         if (animRef.current) cancelAnimationFrame(animRef.current);
         drawnRef.current = 0;
         const dotR  = Math.max(0.5, dotRadius * PX * DPR);
@@ -602,9 +719,9 @@
         if (!points.length) return;
         const name = svgName || shape;
 
-        // ── TXT ──
+        // TXT
         const hdr = [
-          "# SVG Rasterizer v3.0",
+          "# SVG Rasterizer v3.1",
           `# Grid: 80x80 lu, origin (0,0) centre, +Y up`,
           `# Source: ${name}  |  Pitch: ${pitch} lu  |  Radius: ${dotRadius} lu`,
           `# Segments: ${getSegments().length}  |  Total dots: ${points.length}`,
@@ -615,8 +732,7 @@
         const txtUrl  = URL.createObjectURL(txtBlob);
         setTxtHref(txtUrl);
 
-        // ── JSON ──
-        // For mono mode, write the named colour label; for gradient modes write the CSS value.
+        // JSON
         const jsonPayload = {
           source:      name,
           pitch:       pitch,
@@ -629,9 +745,15 @@
             color: dotColor,
           })),
         };
-        const jsonBlob = new Blob([JSON.stringify(jsonPayload, null, 2)], { type: "application/json" });
+        const jsonString = JSON.stringify(jsonPayload, null, 2);
+        jsonStringRef.current = jsonString;                         // ← keep ref in sync
+
+        const jsonBlob = new Blob([jsonString], { type: "application/json" });
         const jsonUrl  = URL.createObjectURL(jsonBlob);
         setJsonHref(jsonUrl);
+
+        // Auto-push [x, y] pairs to kernel — silent if not in Colab
+        invokeColabCoords(points);
 
         return () => {
           URL.revokeObjectURL(txtUrl);
@@ -669,7 +791,6 @@
 
       const clearSVG = () => { setSvgSegs(null); setSvgName(""); setParseError(""); };
 
-      // Hover hit-test
       const handleMouseMove = e => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -717,6 +838,39 @@
         </div>
       );
 
+      // ── Colab button appearance ───────────────────────────────────────────────
+      const colabBtnStyle = () => {
+        const base = {
+          display: "block", width: "100%", marginBottom: 4,
+          boxSizing: "border-box",
+          padding: "5px 10px", fontSize: 8, letterSpacing: "0.1em",
+          fontFamily: "monospace", whiteSpace: "nowrap",
+          cursor: "pointer", border: "1px solid",
+          textAlign: "left", transition: "all 0.2s",
+        };
+        if (!points.length) return { ...base,
+          background: "transparent", borderColor: "#1a1a2a", color: "#2a2a40",
+          cursor: "default" };
+        if (colabStatus === 'saving') return { ...base,
+          background: "rgba(255,221,0,0.08)", borderColor: "#ffdd0044", color: "#ffdd00",
+          cursor: "default" };
+        if (colabStatus === 'saved') return { ...base,
+          background: "rgba(0,255,204,0.12)", borderColor: "#00ffcc88", color: "#00ffcc" };
+        if (colabStatus === 'error') return { ...base,
+          background: "rgba(255,68,85,0.08)", borderColor: "#ff445544", color: "#ff4455" };
+        return { ...base,
+          background: "rgba(90,70,190,0.08)", borderColor: "#5a46be88", color: "#a888ff",
+          cursor: "pointer" };
+      };
+
+      const colabBtnLabel = () => {
+        if (!points.length)           return "⬡ Colab";
+        if (colabStatus === 'saving') return "⏳ Saving…";
+        if (colabStatus === 'saved')  return "✓ Saved!";
+        if (colabStatus === 'error')  return "⚠ Error";
+        return "⬡ → Colab";
+      };
+
       // ── Render ──────────────────────────────────────────────────────────────
       return (
         <div style={{ display: "flex", flexDirection: "column", height: "100vh",
@@ -730,7 +884,7 @@
             <span style={{ fontWeight: 700, fontSize: 12,
               letterSpacing: "0.1em", color: "#fff" }}>VECTOR → RASTER</span>
             <span style={{ background: "#00ffcc", color: "#000", fontSize: 8,
-              padding: "2px 7px", fontWeight: 700, letterSpacing: "0.14em" }}>v3.0</span>
+              padding: "2px 7px", fontWeight: 700, letterSpacing: "0.14em" }}>v3.1</span>
             <span style={{ color: "#222242", fontSize: 9 }}>80×80 lu · {VIEW}px · +Y↑</span>
             <span style={{ color: "#00ffcc", fontSize: 9 }}>{points.length} dots</span>
             {svgSegs &&
@@ -741,6 +895,24 @@
             {parseError &&
               <span style={{ color: "#ff4d6d", fontSize: 9 }}>⚠ {parseError}</span>
             }
+
+            {/* ── Colab status toast in header ── */}
+            {colabStatus === 'saved' && colabMsg && (
+              <span style={{ color: "#00ffcc", background: "#051510",
+                border: "1px solid #00ffcc33", padding: "2px 8px", fontSize: 8 }}>
+                ✓ {colabMsg}
+              </span>
+            )}
+            {colabStatus === 'error' && colabMsg && (
+              <span style={{ color: "#ff4455", background: "#150505",
+                border: "1px solid #ff445533", padding: "2px 8px", fontSize: 8,
+                maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap" }}
+                title={colabMsg}>
+                ⚠ {colabMsg}
+              </span>
+            )}
+
             {hovered
               ? <span style={{ marginLeft: "auto", color: "#00ffcc",
                   background: "#051510", padding: "2px 10px",
@@ -944,9 +1116,11 @@
               <div style={{ padding: "10px 12px", flexShrink: 0 }}>
                 <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
                   marginBottom: 6, textTransform: "uppercase" }}>Export</div>
+
+                {/* PNG download */}
                 <a
                   href={pngHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.png`}
+                  download={`raster_v3.1_${svgName || shape}.png`}
                   style={{
                     display: "block", width: "100%", marginBottom: 4,
                     boxSizing: "border-box",
@@ -959,9 +1133,11 @@
                     cursor: pngHref ? "pointer" : "default",
                     pointerEvents: pngHref ? "auto" : "none",
                   }}>↓ PNG</a>
+
+                {/* TXT download */}
                 <a
                   href={txtHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.txt`}
+                  download={`raster_v3.1_${svgName || shape}.txt`}
                   style={{
                     display: "block", width: "100%", marginBottom: 4,
                     boxSizing: "border-box",
@@ -974,11 +1150,14 @@
                     cursor: txtHref ? "pointer" : "default",
                     pointerEvents: txtHref ? "auto" : "none",
                   }}>↓ TXT</a>
+
+                {/* JSON download */}
                 <a
                   href={jsonHref || undefined}
-                  download={`raster_v3.0_${svgName || shape}.json`}
+                  download={`raster_v3.1_${svgName || shape}.json`}
                   style={{
-                    display: "block", width: "100%", boxSizing: "border-box",
+                    display: "block", width: "100%", marginBottom: 4,
+                    boxSizing: "border-box",
                     background: jsonHref ? "rgba(168,136,255,0.07)" : "transparent",
                     border: `1px solid ${jsonHref ? "#5a46be88" : "#1a1a2a"}`,
                     color: jsonHref ? "#a888ff" : "#2a2a40",
@@ -988,6 +1167,23 @@
                     cursor: jsonHref ? "pointer" : "default",
                     pointerEvents: jsonHref ? "auto" : "none",
                   }}>↓ JSON</a>
+
+                {/* ── NEW: Save JSON to Colab ── */}
+                <button
+                  onClick={saveToColab}
+                  disabled={!points.length || colabStatus === 'saving'}
+                  className={colabStatus === 'saved' ? 'colab-saved' : ''}
+                  style={colabBtnStyle()}>
+                  {colabBtnLabel()}
+                </button>
+
+                {/* Colab setup hint — shown only when not in Colab */}
+                {colabStatus === 'error' && colabMsg.includes('Not running') && (
+                  <div style={{ marginTop: 4, fontSize: 7, color: "#383850",
+                    lineHeight: 1.5, maxWidth: 90 }}>
+                    Register handler in Colab first — see HTML comment.
+                  </div>
+                )}
               </div>
             </div>
 
