@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<!--
+  SVG Rasterizer v3.0  —  Self-contained HTML / Colab package
+  ─────────────────────────────────────────────────────────────
+  Dependencies loaded via CDN (no install required):
+    • React 18 + ReactDOM
+    • Babel Standalone (transpiles JSX in-browser)
+
+  USAGE IN GOOGLE COLAB
+  ─────────────────────
+  from IPython.display import IFrame, display
+  display(IFrame(src="svg_rasterizer_v3.0.html", width="100%", height="700"))
+
+  Or open directly in any modern browser — no server needed.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SVG Rasterizer v3.0</title>
+
+  <!-- React 18 -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel standalone — transpiles JSX at runtime -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; overflow: hidden; }
+    body { background: #07070f; font-family: monospace; }
+
+    /* Slider thumb styling */
+    input[type=range] { -webkit-appearance: none; appearance: none;
+      height: 3px; border-radius: 2px; background: #141430; outline: none; }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 12px; height: 12px;
+      border-radius: 50%; background: #00ffcc; cursor: pointer; }
+    input[type=range]::-moz-range-thumb {
+      width: 12px; height: 12px; border-radius: 50%;
+      background: #00ffcc; cursor: pointer; border: none; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #07070f; }
+    ::-webkit-scrollbar-thumb { background: #1e1e3a; border-radius: 2px; }
+
+    /* Checkbox accent */
+    input[type=checkbox] { accent-color: #00ffcc; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ── Constants ────────────────────────────────────────────────────────────────
+    // Logical grid: 80×80 units, origin (0,0) at centre → range −40..+40
+    // Canvas buffer is 2× display size for crisp HiDPI rendering
+    const GRID = 80;
+    const HALF = GRID / 2;       // 40
+    const VIEW = 192;            // CSS display px
+    const DPR  = 2;              // buffer multiplier
+    const BUF  = VIEW * DPR;    // internal buffer px (384)
+    const PX   = VIEW / GRID;   // px per logical unit at display size (2.4)
+
+    // Logical → buffer pixel
+    const lx2buf = x =>  (x + HALF) * PX * DPR;
+    const ly2buf = y =>  (HALF - y) * PX * DPR;
+
+    // Display pixel → logical (for hover hit-testing)
+    const dx2l = cx => cx * (GRID / VIEW) - HALF;
+    const dy2l = cy => HALF - cy * (GRID / VIEW);
+
+    // ── Built-in shapes ──────────────────────────────────────────────────────────
+    // Each shape returns [[{x,y}, …]] — one segment wrapped in an array.
+    const SHAPES = {
+      circle: (n) => {
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = (i / n) * Math.PI * 2;
+          pts.push({ x: Math.cos(t) * 36, y: Math.sin(t) * 36 });
+        }
+        return [pts];
+      },
+      star: (n) => {
+        const pts = [];
+        const spikes = 5, outer = 36, inner = 15;
+        for (let i = 0; i <= n; i++) {
+          const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+          const r = Math.floor((i / n) * spikes * 2) % 2 === 0 ? outer : inner;
+          pts.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+        }
+        return [pts];
+      },
+      heart: (n) => {
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = (i / n) * Math.PI * 2;
+          pts.push({
+            x:  (16 * Math.pow(Math.sin(t), 3)) * 2.0,
+            y: -(13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * 1.9,
+          });
+        }
+        return [pts];
+      },
+      spiral: (n) => {
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = i / n;
+          pts.push({ x: Math.cos(t * Math.PI * 7) * t * 38, y: Math.sin(t * Math.PI * 7) * t * 38 });
+        }
+        return [pts];
+      },
+      wave: (n) => {
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = i / n;
+          pts.push({ x: -38 + t * 76, y: Math.sin(t * Math.PI * 4) * 28 });
+        }
+        return [pts];
+      },
+      square: (n) => {
+        const s = 36;
+        const verts = [[-s,-s],[s,-s],[s,s],[-s,s],[-s,-s]];
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const t = (i / n) * 4;
+          const seg = Math.min(Math.floor(t), 3);
+          const f = t - seg;
+          const [ax, ay] = verts[seg];
+          const [bx, by] = verts[seg + 1];
+          pts.push({ x: ax + (bx - ax) * f, y: ay + (by - ay) * f });
+        }
+        return [pts];
+      },
+    };
+
+    // ── SVG path parser ──────────────────────────────────────────────────────────
+    // Returns [[{x,y},…], …] — one array per sub-path.
+    // Each M command flushes the current sub-path and starts a new one,
+    // so disconnected sub-paths are never joined by a spurious bridge line.
+    function parseSVGPathD(d) {
+      const re = /([MmZzLlHhVvCcSsQqTtAa])|([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/g;
+      const tokens = [];
+      let m;
+      while ((m = re.exec(d)) !== null) {
+        if (m[1]) tokens.push({ type: "cmd", val: m[1] });
+        else      tokens.push({ type: "num", val: parseFloat(m[2]) });
+      }
+
+      const subPaths = [];
+      let current = [];
+      let cx = 0, cy = 0, startX = 0, startY = 0, lastCPX = 0, lastCPY = 0;
+      let i = 0;
+
+      const num    = () => (tokens[i]?.type === "num" ? tokens[i++].val : 0);
+      const hasNum = () => !!(tokens[i]?.type === "num");
+
+      const flushAndStart = (x, y) => {
+        if (current.length > 1) subPaths.push(current);
+        current = [{ x, y }];
+      };
+
+      const cubicBez = (x0, y0, x1, y1, x2, y2, x3, y3, steps = 20) => {
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps, u = 1 - t;
+          current.push({
+            x: u*u*u*x0 + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3,
+            y: u*u*u*y0 + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3,
+          });
+        }
+      };
+
+      const quadBez = (x0, y0, x1, y1, x2, y2, steps = 16) => {
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps, u = 1 - t;
+          current.push({
+            x: u*u*x0 + 2*u*t*x1 + t*t*x2,
+            y: u*u*y0 + 2*u*t*y1 + t*t*y2,
+          });
+        }
+      };
+
+      while (i < tokens.length) {
+        if (!tokens[i] || tokens[i].type !== "cmd") { i++; continue; }
+        const cmd = tokens[i++].val;
+        const abs = cmd === cmd.toUpperCase();
+        const C   = cmd.toUpperCase();
+
+        if (C === "M") {
+          cx = abs ? num() : cx + num();
+          cy = abs ? num() : cy + num();
+          startX = cx; startY = cy;
+          flushAndStart(cx, cy);
+          while (hasNum()) {
+            cx = abs ? num() : cx + num();
+            cy = abs ? num() : cy + num();
+            current.push({ x: cx, y: cy });
+          }
+        }
+        else if (C === "L") {
+          while (hasNum()) {
+            cx = abs ? num() : cx + num();
+            cy = abs ? num() : cy + num();
+            current.push({ x: cx, y: cy });
+          }
+        }
+        else if (C === "H") {
+          while (hasNum()) {
+            cx = abs ? num() : cx + num();
+            current.push({ x: cx, y: cy });
+          }
+        }
+        else if (C === "V") {
+          while (hasNum()) {
+            cy = abs ? num() : cy + num();
+            current.push({ x: cx, y: cy });
+          }
+        }
+        else if (C === "Z") {
+          current.push({ x: startX, y: startY });
+          if (current.length > 1) subPaths.push(current);
+          current = [];
+          cx = startX; cy = startY;
+        }
+        else if (C === "C") {
+          while (hasNum()) {
+            const x1 = abs ? num() : cx + num(), y1 = abs ? num() : cy + num();
+            const x2 = abs ? num() : cx + num(), y2 = abs ? num() : cy + num();
+            const x  = abs ? num() : cx + num(), y  = abs ? num() : cy + num();
+            cubicBez(cx, cy, x1, y1, x2, y2, x, y);
+            lastCPX = x2; lastCPY = y2; cx = x; cy = y;
+          }
+        }
+        else if (C === "S") {
+          while (hasNum()) {
+            const x2 = abs ? num() : cx + num(), y2 = abs ? num() : cy + num();
+            const x  = abs ? num() : cx + num(), y  = abs ? num() : cy + num();
+            cubicBez(cx, cy, 2*cx - lastCPX, 2*cy - lastCPY, x2, y2, x, y);
+            lastCPX = x2; lastCPY = y2; cx = x; cy = y;
+          }
+        }
+        else if (C === "Q") {
+          while (hasNum()) {
+            const x1 = abs ? num() : cx + num(), y1 = abs ? num() : cy + num();
+            const x  = abs ? num() : cx + num(), y  = abs ? num() : cy + num();
+            quadBez(cx, cy, x1, y1, x, y);
+            lastCPX = x1; lastCPY = y1; cx = x; cy = y;
+          }
+        }
+        else if (C === "T") {
+          while (hasNum()) {
+            const x = abs ? num() : cx + num(), y = abs ? num() : cy + num();
+            quadBez(cx, cy, 2*cx - lastCPX, 2*cy - lastCPY, x, y);
+            lastCPX = 2*cx - lastCPX; lastCPY = 2*cy - lastCPY; cx = x; cy = y;
+          }
+        }
+        else if (C === "A") {
+          while (hasNum()) {
+            num(); num(); num(); num(); num(); // skip rx ry x-rot large-arc sweep
+            const ex = abs ? num() : cx + num();
+            const ey = abs ? num() : cy + num();
+            for (let s = 1; s <= 24; s++)
+              current.push({ x: cx + (ex - cx) * (s / 24), y: cy + (ey - cy) * (s / 24) });
+            cx = ex; cy = ey;
+          }
+        }
+      }
+
+      if (current.length > 1) subPaths.push(current);
+      return subPaths;
+    }
+
+    // ── SVG element extractor ────────────────────────────────────────────────────
+    // Returns [[{x,y},…], …] — one segment per SVG element / sub-path.
+    // Segments are never joined across element or sub-path boundaries.
+    function extractSVGPaths(svgText) {
+      const parser = new DOMParser();
+      const doc    = parser.parseFromString(svgText, "image/svg+xml");
+      if (doc.querySelector("parsererror")) return null;
+      const svgEl = doc.querySelector("svg");
+      if (!svgEl) return null;
+
+      let vbW = 0, vbH = 0;
+      const vb = svgEl.getAttribute("viewBox");
+      if (vb) {
+        const parts = vb.trim().split(/[\s,]+/).map(Number);
+        vbW = parts[2]; vbH = parts[3];
+      } else {
+        vbW = parseFloat(svgEl.getAttribute("width")  || 100);
+        vbH = parseFloat(svgEl.getAttribute("height") || 100);
+      }
+      if (!vbW || !vbH) { vbW = 100; vbH = 100; }
+
+      const allSegments = [];
+
+      doc.querySelectorAll("path,polyline,polygon,line,rect,circle,ellipse").forEach(el => {
+        const tag = el.tagName.toLowerCase();
+
+        if (tag === "path") {
+          const d = el.getAttribute("d");
+          if (d) parseSVGPathD(d).forEach(seg => allSegments.push(seg));
+        }
+        else if (tag === "polyline" || tag === "polygon") {
+          const nums = (el.getAttribute("points") || "")
+            .trim().split(/[\s,]+/).map(Number).filter(n => !isNaN(n));
+          const pts = [];
+          for (let k = 0; k < nums.length - 1; k += 2)
+            pts.push({ x: nums[k], y: nums[k + 1] });
+          if (tag === "polygon" && pts.length) pts.push(pts[0]);
+          if (pts.length > 1) allSegments.push(pts);
+        }
+        else if (tag === "line") {
+          allSegments.push([
+            { x: parseFloat(el.getAttribute("x1") || 0), y: parseFloat(el.getAttribute("y1") || 0) },
+            { x: parseFloat(el.getAttribute("x2") || 0), y: parseFloat(el.getAttribute("y2") || 0) },
+          ]);
+        }
+        else if (tag === "rect") {
+          const rx = parseFloat(el.getAttribute("x")      || 0);
+          const ry = parseFloat(el.getAttribute("y")      || 0);
+          const rw = parseFloat(el.getAttribute("width")  || 0);
+          const rh = parseFloat(el.getAttribute("height") || 0);
+          allSegments.push([
+            { x: rx,      y: ry },
+            { x: rx + rw, y: ry },
+            { x: rx + rw, y: ry + rh },
+            { x: rx,      y: ry + rh },
+            { x: rx,      y: ry },
+          ]);
+        }
+        else if (tag === "circle") {
+          const ccx = parseFloat(el.getAttribute("cx") || 0);
+          const ccy = parseFloat(el.getAttribute("cy") || 0);
+          const r   = parseFloat(el.getAttribute("r")  || 0);
+          const pts = [];
+          for (let k = 0; k <= 64; k++)
+            pts.push({ x: ccx + Math.cos(k / 64 * Math.PI * 2) * r,
+                       y: ccy + Math.sin(k / 64 * Math.PI * 2) * r });
+          allSegments.push(pts);
+        }
+        else if (tag === "ellipse") {
+          const ecx = parseFloat(el.getAttribute("cx") || 0);
+          const ecy = parseFloat(el.getAttribute("cy") || 0);
+          const erx = parseFloat(el.getAttribute("rx") || 0);
+          const ery = parseFloat(el.getAttribute("ry") || 0);
+          const pts = [];
+          for (let k = 0; k <= 64; k++)
+            pts.push({ x: ecx + Math.cos(k / 64 * Math.PI * 2) * erx,
+                       y: ecy + Math.sin(k / 64 * Math.PI * 2) * ery });
+          allSegments.push(pts);
+        }
+      });
+
+      if (!allSegments.length) return null;
+
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      allSegments.forEach(seg =>
+        seg.forEach(p => {
+          if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+        })
+      );
+      const spanX = maxX - minX || 1;
+      const spanY = maxY - minY || 1;
+      const sc    = Math.min((HALF * 2 - 2) / spanX, (HALF * 2 - 2) / spanY);
+      const midX  = (minX + maxX) / 2;
+      const midY  = (minY + maxY) / 2;
+
+      return allSegments.map(seg =>
+        seg.map(p => ({ x: (p.x - midX) * sc, y: (p.y - midY) * sc }))
+      );
+    }
+
+    // ── Arc-length resample (single segment) ─────────────────────────────────────
+    function resampleSegment(pts, n) {
+      if (pts.length < 2) return pts;
+      const lens = [0];
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+        lens.push(lens[i-1] + Math.sqrt(dx*dx + dy*dy));
+      }
+      const total = lens[lens.length - 1];
+      if (!total) return pts.slice(0, Math.min(n, pts.length));
+      const out = [];
+      let j = 0;
+      for (let k = 0; k <= n; k++) {
+        const target = (k / n) * total;
+        while (j < lens.length - 2 && lens[j+1] < target) j++;
+        const denom = lens[j+1] - lens[j];
+        const t     = denom === 0 ? 0 : (target - lens[j]) / denom;
+        out.push({
+          x: pts[j].x + t * (pts[j+1].x - pts[j].x),
+          y: pts[j].y + t * (pts[j+1].y - pts[j].y),
+        });
+      }
+      return out;
+    }
+
+    // ── Pitch-based dot sampler (multi-segment) ──────────────────────────────────
+    // Processes each segment independently — no bridge dots between sub-paths.
+    function buildDots(segments, pitch) {
+      const FINE = 800;
+      const dots = [];
+      segments.forEach(seg => {
+        const fine = resampleSegment(seg, FINE);
+        if (!fine.length) return;
+        dots.push(fine[0]);
+        let accumulated = 0;
+        for (let i = 1; i < fine.length; i++) {
+          const dx = fine[i].x - fine[i-1].x, dy = fine[i].y - fine[i-1].y;
+          accumulated += Math.sqrt(dx*dx + dy*dy);
+          if (accumulated >= pitch) {
+            dots.push(fine[i]);
+            accumulated = 0;
+          }
+        }
+      });
+      return dots;
+    }
+
+    // ── Color modes ──────────────────────────────────────────────────────────────
+    const COLORMODES = {
+      position: (_t, x, y) =>
+        `hsl(${Math.round(((x + HALF) / GRID) * 220 + 120)},90%,${55 + Math.round(((y + HALF) / GRID) * 20)}%)`,
+      index: (t) =>
+        `hsl(${Math.round(t * 340)},100%,65%)`,
+      tangent: (_t, x, y, nx, ny) =>
+        `hsl(${Math.round(((Math.atan2(ny - y, nx - x) / Math.PI + 1) / 2) * 360)},90%,65%)`,
+      mono: () => "#00ffcc",
+    };
+
+    // ── App component ────────────────────────────────────────────────────────────
+    function App() {
+      const canvasRef    = useRef(null);
+      const animRef      = useRef(null);
+      const drawnRef     = useRef(0);
+      const fileInputRef = useRef(null);
+
+      const [shape,      setShape]      = useState("circle");
+      const [svgSegs,    setSvgSegs]    = useState(null);
+      const [svgName,    setSvgName]    = useState("");
+      const [pitch,      setPitch]      = useState(2.0);
+      const [dotRadius,  setDotRadius]  = useState(0.6);
+      const [colorMode,  setColorMode]  = useState("position");
+      const [showGrid,   setShowGrid]   = useState(true);
+      const [showAxes,   setShowAxes]   = useState(true);
+      const [showGhost,  setShowGhost]  = useState(true);
+      const [points,     setPoints]     = useState([]);
+      const [hovered,    setHovered]    = useState(null);
+      const [dragOver,   setDragOver]   = useState(false);
+      const [parseError, setParseError] = useState("");
+      const [pngHref,    setPngHref]    = useState("");
+      const [txtHref,    setTxtHref]    = useState("");
+
+      const getSegments = useCallback(() => {
+        return svgSegs ?? SHAPES[shape](800);
+      }, [svgSegs, shape]);
+
+      const rasterize = useCallback(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, BUF, BUF);
+
+        // Background
+        ctx.fillStyle = "#07070f";
+        ctx.fillRect(0, 0, BUF, BUF);
+
+        // Grid — single pass, isMajor decides colour and weight
+        if (showGrid) {
+          for (let u = -HALF; u <= HALF; u += 5) {
+            const isMajor = u % 10 === 0;
+            ctx.strokeStyle = isMajor ? "#141430" : "#0d0d1e";
+            ctx.lineWidth   = isMajor ? 1.5 : 0.75;
+            const bx = lx2buf(u), by = ly2buf(u);
+            ctx.beginPath(); ctx.moveTo(bx, 0);  ctx.lineTo(bx, BUF); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0,  by); ctx.lineTo(BUF, by); ctx.stroke();
+          }
+          ctx.fillStyle = "#1e1e3a";
+          ctx.font = "10px monospace";
+          const ox = lx2buf(0), oy = ly2buf(0);
+          for (let u = -HALF + 10; u < HALF; u += 10) {
+            ctx.fillText(u, lx2buf(u) + 3, oy - 3);
+            if (u !== 0) ctx.fillText(u, ox + 3, ly2buf(u) + 4);
+          }
+        }
+
+        // Axes
+        if (showAxes) {
+          const ox = lx2buf(0), oy = ly2buf(0);
+          ctx.strokeStyle = "#2a2a55";
+          ctx.lineWidth   = 2;
+          ctx.beginPath(); ctx.moveTo(0, oy);  ctx.lineTo(BUF, oy); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(ox, 0);  ctx.lineTo(ox, BUF); ctx.stroke();
+          ctx.fillStyle = "#2a2a55";
+          [[BUF - 4, oy, 1, 0], [ox, 4, -1, 0]].forEach(([ax, ay, dx, dy]) => {
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(ax - 8*dx + 4*dy, ay - 8*dy + 4*dx);
+            ctx.lineTo(ax - 8*dx - 4*dy, ay - 8*dy - 4*dx);
+            ctx.closePath(); ctx.fill();
+          });
+          ctx.fillStyle = "#3a3a70";
+          ctx.beginPath(); ctx.arc(ox, oy, 3, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#303060";
+          ctx.font = "bold 11px monospace";
+          ctx.fillText("+X", BUF - 22, oy - 5);
+          ctx.fillText("+Y", ox + 5,   14);
+          ctx.fillText("0",  ox + 4,   oy - 4);
+          ctx.fillStyle = "#1e1e38";
+          ctx.font = "9px monospace";
+          ctx.fillText("−40", 2,        oy - 4);
+          ctx.fillText("+40", BUF - 30, oy - 4);
+          ctx.fillText("+40", ox + 4,   10);
+          ctx.fillText("−40", ox + 4,   BUF - 3);
+        }
+
+        const segs = getSegments();
+        const dots = buildDots(segs, pitch);
+        if (!dots.length) return;
+
+        // Ghost path — one stroke() per segment, never bridging sub-paths
+        if (showGhost) {
+          ctx.strokeStyle = "rgba(255,255,255,0.08)";
+          ctx.lineWidth   = 1.5;
+          segs.forEach(seg => {
+            const fine = resampleSegment(seg, 600);
+            if (fine.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(lx2buf(fine[0].x), ly2buf(fine[0].y));
+            for (let k = 1; k < fine.length; k++)
+              ctx.lineTo(lx2buf(fine[k].x), ly2buf(fine[k].y));
+            ctx.stroke();
+          });
+        }
+
+        // Build coloured dot list
+        const colorFn = COLORMODES[colorMode];
+        const final = dots.map((p, idx) => {
+          const nxt   = dots[idx + 1] || dots[idx];
+          const color = colorFn(idx / dots.length, p.x, p.y, nxt.x, nxt.y);
+          return {
+            ...p,
+            bx:  lx2buf(p.x),
+            by:  ly2buf(p.y),
+            color,
+            lx:  Math.round(p.x * 10) / 10,
+            ly:  Math.round(p.y * 10) / 10,
+            idx,
+          };
+        });
+        setPoints(final);
+
+        // Animated dot draw
+        if (animRef.current) cancelAnimationFrame(animRef.current);
+        drawnRef.current = 0;
+        const dotR  = Math.max(0.5, dotRadius * PX * DPR);
+        const batch = Math.max(4, Math.ceil(final.length / 30));
+
+        const drawBatch = () => {
+          const end = Math.min(drawnRef.current + batch, final.length);
+          for (let k = drawnRef.current; k < end; k++) {
+            const p = final[k];
+            ctx.beginPath();
+            ctx.arc(p.bx, p.by, dotR, 0, Math.PI * 2);
+            ctx.fillStyle = p.color;
+            ctx.fill();
+          }
+          drawnRef.current = end;
+          if (drawnRef.current < final.length) {
+            animRef.current = requestAnimationFrame(drawBatch);
+          } else {
+            setPngHref(canvas.toDataURL("image/png"));
+          }
+        };
+        animRef.current = requestAnimationFrame(drawBatch);
+
+      }, [getSegments, pitch, dotRadius, colorMode, showGrid, showAxes, showGhost]);
+
+      useEffect(() => { rasterize(); }, [rasterize]);
+
+      // Rebuild TXT blob URL whenever points change
+      useEffect(() => {
+        if (!points.length) return;
+        const name = svgName || shape;
+        const hdr = [
+          "# SVG Rasterizer v3.0",
+          `# Grid: 80x80 lu, origin (0,0) centre, +Y up`,
+          `# Source: ${name}  |  Pitch: ${pitch} lu  |  Radius: ${dotRadius} lu`,
+          `# Segments: ${getSegments().length}  |  Total dots: ${points.length}`,
+          "index\tx\ty\tcolor",
+        ].join("\n");
+        const rows = points.map(p => `${p.idx}\t${p.lx}\t${p.ly}\t${p.color}`);
+        const blob = new Blob([[hdr, ...rows].join("\n")], { type: "text/plain" });
+        const url  = URL.createObjectURL(blob);
+        setTxtHref(url);
+        return () => URL.revokeObjectURL(url);
+      }, [points, pitch, dotRadius, shape, svgName, getSegments]);
+
+      // File load handlers
+      const loadSVGText = (text, name) => {
+        setParseError("");
+        const segs = extractSVGPaths(text);
+        if (!segs || !segs.length) { setParseError("No parseable paths."); return; }
+        setSvgSegs(segs);
+        setSvgName(name);
+      };
+
+      const handleFileInput = e => {
+        const f = e.target.files[0];
+        if (!f) return;
+        const r = new FileReader();
+        r.onload = ev => loadSVGText(ev.target.result, f.name);
+        r.readAsText(f);
+        e.target.value = "";
+      };
+
+      const handleDrop = e => {
+        e.preventDefault();
+        setDragOver(false);
+        const f = e.dataTransfer.files[0];
+        if (!f) return;
+        const r = new FileReader();
+        r.onload = ev => loadSVGText(ev.target.result, f.name);
+        r.readAsText(f);
+      };
+
+      const clearSVG = () => { setSvgSegs(null); setSvgName(""); setParseError(""); };
+
+      // Hover hit-test
+      const handleMouseMove = e => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect  = canvas.getBoundingClientRect();
+        const lx    = dx2l(e.clientX - rect.left);
+        const ly    = dy2l(e.clientY - rect.top);
+        const thresh = pitch * 0.7;
+        let hit = null;
+        for (const p of points) {
+          const dx = p.x - lx, dy = p.y - ly;
+          if (Math.sqrt(dx*dx + dy*dy) < thresh) { hit = p; break; }
+        }
+        setHovered(hit);
+      };
+
+      // ── UI helpers ──────────────────────────────────────────────────────────
+      const shapeList = [
+        { id: "circle", label: "○ Circle" }, { id: "star",   label: "★ Star"   },
+        { id: "heart",  label: "♥ Heart"  }, { id: "spiral", label: "◎ Spiral" },
+        { id: "wave",   label: "∿ Wave"   }, { id: "square", label: "□ Square" },
+      ];
+      const modeList = [
+        { id: "position", label: "XY Pos"  }, { id: "index",   label: "Index"   },
+        { id: "tangent",  label: "Tangent" }, { id: "mono",    label: "Mono"    },
+      ];
+
+      const BTN = {
+        display: "block", width: "100%", textAlign: "left",
+        padding: "4px 7px", marginBottom: 2, cursor: "pointer",
+        fontSize: 10, fontFamily: "monospace", transition: "all 0.1s",
+        border: "none",
+      };
+
+      const Slider = ({ label, val, set, min, max, step, unit }) => (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between",
+            marginBottom: 4, fontSize: 10, color: "#404065" }}>
+            <span>{label}</span>
+            <span style={{ color: "#00ffcc", fontVariantNumeric: "tabular-nums" }}>
+              {val}{unit}
+            </span>
+          </div>
+          <input type="range" min={min} max={max} step={step} value={val}
+            onChange={e => set(Number(e.target.value))}
+            style={{ width: "100%", cursor: "pointer" }} />
+          <div style={{ display: "flex", justifyContent: "space-between",
+            fontSize: 8, color: "#252542", marginTop: 2 }}>
+            <span>{min}{unit}</span><span>{max}{unit}</span>
+          </div>
+        </div>
+      );
+
+      // ── Render ──────────────────────────────────────────────────────────────
+      return (
+        <div style={{ display: "flex", flexDirection: "column", height: "100vh",
+          background: "#07070f", color: "#b0b0c8", fontFamily: "monospace",
+          fontSize: 12, overflow: "hidden" }}>
+
+          {/* Header */}
+          <div style={{ padding: "7px 14px", borderBottom: "1px solid #12122a",
+            display: "flex", alignItems: "center", gap: 10,
+            flexShrink: 0, flexWrap: "wrap", minHeight: 36 }}>
+            <span style={{ fontWeight: 700, fontSize: 12,
+              letterSpacing: "0.1em", color: "#fff" }}>VECTOR → RASTER</span>
+            <span style={{ background: "#00ffcc", color: "#000", fontSize: 8,
+              padding: "2px 7px", fontWeight: 700, letterSpacing: "0.14em" }}>v3.0</span>
+            <span style={{ color: "#222242", fontSize: 9 }}>80×80 lu · {VIEW}px · +Y↑</span>
+            <span style={{ color: "#00ffcc", fontSize: 9 }}>{points.length} dots</span>
+            {svgSegs &&
+              <span style={{ color: "#404068", fontSize: 9 }}>
+                {svgSegs.length} segment{svgSegs.length !== 1 ? "s" : ""}
+              </span>
+            }
+            {parseError &&
+              <span style={{ color: "#ff4d6d", fontSize: 9 }}>⚠ {parseError}</span>
+            }
+            {hovered
+              ? <span style={{ marginLeft: "auto", color: "#00ffcc",
+                  background: "#051510", padding: "2px 10px",
+                  border: "1px solid #00ffcc33", fontSize: 10, flexShrink: 0 }}>
+                  x:{hovered.lx} · y:{hovered.ly} · #{hovered.idx}
+                </span>
+              : <span style={{ marginLeft: "auto", color: "#1e1e38", fontSize: 9 }}>
+                  hover to inspect
+                </span>
+            }
+          </div>
+
+          {/* Body */}
+          <div style={{ display: "flex", flexDirection: "column",
+            flex: 1, overflow: "hidden" }}>
+
+            {/* 1. Canvas preview */}
+            <div style={{ display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center",
+              background: "#050509", padding: "18px 0 14px",
+              borderBottom: "1px solid #12122a", flexShrink: 0 }}>
+
+              <div style={{ display: "flex", gap: 14, fontSize: 8,
+                color: "#1e1e3a", letterSpacing: "0.1em", marginBottom: 12 }}>
+                <span>{VIEW}×{VIEW} px</span>
+                <span>GRID 80×80 lu</span>
+                <span>PITCH {pitch} lu</span>
+                <span>RADIUS {dotRadius} lu</span>
+              </div>
+
+              <div style={{ position: "relative", width: VIEW, height: VIEW, flexShrink: 0 }}>
+                <div style={{ position: "absolute", top: -13, left: 0, fontSize: 7,
+                  color: "#1a1a34", pointerEvents: "none",
+                  whiteSpace: "nowrap" }}>(−40,+40)</div>
+                <div style={{ position: "absolute", top: -13, right: 0, fontSize: 7,
+                  color: "#1a1a34", pointerEvents: "none",
+                  whiteSpace: "nowrap" }}>(+40,+40)</div>
+
+                <canvas
+                  ref={canvasRef}
+                  width={BUF}
+                  height={BUF}
+                  onMouseMove={handleMouseMove}
+                  onMouseLeave={() => setHovered(null)}
+                  style={{ display: "block", width: VIEW, height: VIEW,
+                    cursor: "crosshair", border: "1px solid #12122a",
+                    boxShadow: "0 0 0 1px #0a0a20, 0 0 28px rgba(0,255,204,0.06)" }}
+                />
+
+                <div style={{ position: "absolute", bottom: -13, left: 0, fontSize: 7,
+                  color: "#1a1a34", pointerEvents: "none",
+                  whiteSpace: "nowrap" }}>(−40,−40)</div>
+                <div style={{ position: "absolute", bottom: -13, right: 0, fontSize: 7,
+                  color: "#1a1a34", pointerEvents: "none",
+                  whiteSpace: "nowrap" }}>(+40,−40)</div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6,
+                fontSize: 8, color: "#1e1e3a", marginTop: 16 }}>
+                <div style={{ width: 10 * PX, height: 1, background: "#202040" }} />
+                <span>10 lu = {(10 * PX).toFixed(1)}px</span>
+              </div>
+            </div>
+
+            {/* 2. Controls strip */}
+            <div style={{ display: "flex", flexDirection: "row",
+              alignItems: "flex-start", borderBottom: "1px solid #12122a",
+              flexShrink: 0, overflowX: "auto", background: "#07070f" }}>
+
+              {/* Load SVG */}
+              <div style={{ padding: "10px 12px", borderRight: "1px solid #12122a",
+                minWidth: 120, flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                  marginBottom: 6, textTransform: "uppercase" }}>Load SVG</div>
+                <div
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  onDrop={handleDrop}
+                  onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  style={{
+                    border: `1px dashed ${dragOver ? "#00ffcc" : svgName ? "#00aa88" : "#202040"}`,
+                    background: dragOver ? "rgba(0,255,204,0.05)" : svgName ? "rgba(0,160,110,0.05)" : "#0a0a1a",
+                    padding: "7px 6px", textAlign: "center", cursor: "pointer",
+                    color: dragOver ? "#00ffcc" : svgName ? "#00cc99" : "#303054",
+                    fontSize: 9, lineHeight: 1.6, transition: "all 0.15s",
+                  }}>
+                  {svgName
+                    ? <div>
+                        <div style={{ fontSize: 12 }}>✓</div>
+                        <div style={{ fontSize: 8, wordBreak: "break-all" }}>
+                          {svgName.length > 14 ? svgName.slice(0, 12) + "…" : svgName}
+                        </div>
+                      </div>
+                    : <div>
+                        <div style={{ fontSize: 14, color: "#202040" }}>⊕</div>
+                        <div>Drop .svg</div>
+                      </div>
+                  }
+                </div>
+                <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml"
+                  style={{ display: "none" }} onChange={handleFileInput} />
+                {svgSegs &&
+                  <button onClick={clearSVG} style={{
+                    marginTop: 4, width: "100%", background: "transparent",
+                    border: "1px solid #1a1a34", color: "#383860",
+                    fontSize: 8, padding: "3px 0", cursor: "pointer",
+                    fontFamily: "monospace",
+                  }}>✕ clear</button>
+                }
+              </div>
+
+              {/* Shape selector */}
+              <div style={{ padding: "10px 12px", borderRight: "1px solid #12122a",
+                minWidth: 100, flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em",
+                  color: svgSegs ? "#141428" : "#282848",
+                  marginBottom: 5, textTransform: "uppercase" }}>
+                  {svgSegs ? "Shape (off)" : "Shape"}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+                  {shapeList.map(s => (
+                    <button key={s.id}
+                      onClick={() => { if (!svgSegs) setShape(s.id); }}
+                      style={{
+                        ...BTN, marginBottom: 0,
+                        background: !svgSegs && shape === s.id
+                          ? "rgba(0,255,204,0.09)" : "transparent",
+                        border: `1px solid ${!svgSegs && shape === s.id ? "#00ffcc" : "#161630"}`,
+                        color: svgSegs ? "#161630"
+                          : (!svgSegs && shape === s.id ? "#00ffcc" : "#404068"),
+                        cursor: svgSegs ? "default" : "pointer",
+                        fontSize: 9, padding: "3px 5px",
+                      }}>{s.label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Color mode */}
+              <div style={{ padding: "10px 12px", borderRight: "1px solid #12122a",
+                minWidth: 90, flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                  marginBottom: 5, textTransform: "uppercase" }}>Color</div>
+                {modeList.map(m => (
+                  <button key={m.id} onClick={() => setColorMode(m.id)} style={{
+                    ...BTN,
+                    background: colorMode === m.id ? "rgba(90,70,190,0.18)" : "transparent",
+                    border: `1px solid ${colorMode === m.id ? "#5a46be" : "#161630"}`,
+                    color: colorMode === m.id ? "#a888ff" : "#404068",
+                    fontSize: 9, padding: "3px 6px",
+                  }}>{m.label}</button>
+                ))}
+              </div>
+
+              {/* Dot settings */}
+              <div style={{ padding: "10px 14px", borderRight: "1px solid #12122a",
+                minWidth: 160, flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                  marginBottom: 8, textTransform: "uppercase" }}>Dot Settings</div>
+                <Slider label="Pitch"  val={pitch}     set={setPitch}
+                  min={0.5} max={10} step={0.5} unit=" lu" />
+                <Slider label="Radius" val={dotRadius} set={setDotRadius}
+                  min={0.1} max={4}  step={0.1} unit=" lu" />
+              </div>
+
+              {/* View toggles */}
+              <div style={{ padding: "10px 12px", borderRight: "1px solid #12122a",
+                minWidth: 80, flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                  marginBottom: 6, textTransform: "uppercase" }}>View</div>
+                {[
+                  ["Grid",  showGrid,  setShowGrid],
+                  ["Axes",  showAxes,  setShowAxes],
+                  ["Ghost", showGhost, setShowGhost],
+                ].map(([lbl, val, set]) => (
+                  <label key={lbl} style={{ display: "flex", alignItems: "center",
+                    gap: 6, cursor: "pointer", fontSize: 10,
+                    color: "#383860", marginBottom: 5 }}>
+                    <input type="checkbox" checked={val}
+                      onChange={e => set(e.target.checked)} />
+                    {lbl}
+                  </label>
+                ))}
+              </div>
+
+              {/* Export */}
+              <div style={{ padding: "10px 12px", flexShrink: 0 }}>
+                <div style={{ fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                  marginBottom: 6, textTransform: "uppercase" }}>Export</div>
+                <a
+                  href={pngHref || undefined}
+                  download={`raster_v3.0_${svgName || shape}.png`}
+                  style={{
+                    display: "block", width: "100%", marginBottom: 4,
+                    boxSizing: "border-box",
+                    background: pngHref ? "rgba(0,255,204,0.08)" : "rgba(0,255,204,0.02)",
+                    border: `1px solid ${pngHref ? "#00ffcc44" : "#1a1a2a"}`,
+                    color: pngHref ? "#00ffcc" : "#2a2a40",
+                    padding: "5px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", whiteSpace: "nowrap",
+                    textDecoration: "none",
+                    cursor: pngHref ? "pointer" : "default",
+                    pointerEvents: pngHref ? "auto" : "none",
+                  }}>↓ PNG</a>
+                <a
+                  href={txtHref || undefined}
+                  download={`raster_v3.0_${svgName || shape}.txt`}
+                  style={{
+                    display: "block", width: "100%", boxSizing: "border-box",
+                    background: "transparent",
+                    border: `1px solid ${txtHref ? "#2a2a48" : "#1a1a2a"}`,
+                    color: txtHref ? "#484870" : "#2a2a40",
+                    padding: "5px 10px", fontSize: 8, letterSpacing: "0.1em",
+                    fontFamily: "monospace", whiteSpace: "nowrap",
+                    textDecoration: "none",
+                    cursor: txtHref ? "pointer" : "default",
+                    pointerEvents: txtHref ? "auto" : "none",
+                  }}>↓ TXT</a>
+              </div>
+            </div>
+
+            {/* 3. Coordinate list */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column",
+              overflow: "hidden", background: "#060610" }}>
+              <div style={{ padding: "5px 12px", borderBottom: "1px solid #12122a",
+                fontSize: 8, letterSpacing: "0.2em", color: "#282848",
+                textTransform: "uppercase", display: "flex",
+                gap: 16, flexShrink: 0 }}>
+                <span># · X · Y · COLOR</span>
+                <span style={{ color: "#1e1e3a" }}>{points.length} points</span>
+              </div>
+              <div style={{ flex: 1, overflow: "auto", padding: "6px 4px" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 2,
+                  alignContent: "flex-start" }}>
+                  {points.slice(0, 600).map((p, i) => (
+                    <div key={i}
+                      onClick={() => setHovered(hovered && hovered.idx === p.idx ? null : p)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 4,
+                        padding: "2px 6px", flexShrink: 0, cursor: "pointer",
+                        background: hovered && hovered.idx === p.idx ? "#0d1a28" : "#0a0a18",
+                        border: `1px solid ${hovered && hovered.idx === p.idx ? "#00ffcc33" : "#10101e"}`,
+                        transition: "all 0.08s",
+                      }}>
+                      <div style={{ width: 5, height: 5, borderRadius: "50%",
+                        background: p.color, flexShrink: 0 }} />
+                      <span style={{ color: "#1e1e38", fontSize: 8,
+                        width: 18, textAlign: "right" }}>{i}</span>
+                      <span style={{ color: "#00ccaa", fontSize: 8,
+                        width: 24, textAlign: "right" }}>{p.lx}</span>
+                      <span style={{ color: "#606088", fontSize: 8,
+                        width: 24, textAlign: "right" }}>{p.ly}</span>
+                    </div>
+                  ))}
+                  {points.length > 600 &&
+                    <div style={{ padding: "2px 8px", color: "#1e1e38",
+                      fontSize: 8, alignSelf: "center" }}>
+                      +{points.length - 600} more…
+                    </div>
+                  }
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    // ── Mount ────────────────────────────────────────────────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
